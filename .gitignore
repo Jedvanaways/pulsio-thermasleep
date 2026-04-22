@@ -1,0 +1,24 @@
+# ESPHome
+esphome/secrets.yaml
+esphome/.esphome/
+esphome/*.bin
+
+# Arduino / PlatformIO build artifacts
+.pio/
+.vscode/
+*.elf
+*.map
+
+# Firmware dumps (if/when Phase 0 SWD readout works)
+firmware/*.bin
+firmware/*.hex
+
+# macOS
+.DS_Store
+
+# Python (for Bastille tooling)
+nrf-research-firmware/
+__pycache__/
+*.pyc
+.venv/
+venv/

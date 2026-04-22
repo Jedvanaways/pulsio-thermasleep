@@ -1,0 +1,3 @@
+# Capture Power button presses here, one per line.
+# Format: hex bytes, space-separated. Example:
+# aa 55 01 00 1c
