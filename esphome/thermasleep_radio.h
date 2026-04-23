@@ -1,27 +1,32 @@
-// ThermaSleep radio helper, included by thermasleep.yaml.
+// ThermaSleep radio helper — LT8910 version.
+// The remote uses an LT8910 transceiver, NOT nRF24. See CHIP_IDENTIFICATION.md.
+//
+// This header is a placeholder skeleton. ESPHome doesn't have a built-in
+// LT8910 component, and the MINI-Qiang/LT8910 Arduino library may need
+// minor wrapping to compile under ESPHome's Arduino-platform build.
+//
 // Fill in the <<FILL>> values from decode.md after Phase 2.
 
 #pragma once
 #include <Arduino.h>
 #include <SPI.h>
-#include <RF24.h>
+// #include <LT8910.h>   // uncomment after adding library to platformio.ini
 
-static constexpr uint8_t CE_PIN  = 4;
-static constexpr uint8_t CSN_PIN = 5;
+static constexpr uint8_t SS_PIN    = 5;
+static constexpr uint8_t RESET_PIN = 4;
+static constexpr uint8_t PKT_PIN   = 2;
 
 // -------- FILL FROM decode.md --------
-static constexpr uint8_t RF_CHANNEL       = 0;                                   // <<FILL>>
-static const     uint8_t RF_ADDRESS[5]    = {0x00, 0x00, 0x00, 0x00, 0x00};      // <<FILL>> MSB first
-static constexpr rf24_datarate_e RF_RATE  = RF24_1MBPS;                          // <<FILL>>
-static constexpr uint8_t RF_ADDRESS_WIDTH = 5;                                   // <<FILL>>
+static constexpr uint8_t  RF_CHANNEL   = 0;                              // <<FILL>>
+static constexpr uint8_t  RF_DATARATE  = 1;                              // <<FILL>> 1=1Mbps, 2=250kbps...
+static constexpr uint64_t RF_SYNCWORD  = 0x0000000000007654ULL;          // <<FILL>>
+static constexpr uint8_t  RF_SYNCWIDTH = 32;                             // <<FILL>>
 
-// Payloads — include the counter slot as 0x00; thermasleep_send() will overwrite
-// the counter byte before transmit. If no counter is used, ignore the ctr arg.
-static constexpr uint8_t COUNTER_BYTE_INDEX = 0xFF;                              // <<FILL>> 0xFF = no counter
+static constexpr uint8_t COUNTER_BYTE_INDEX = 0xFF;                      // <<FILL>> 0xFF = no counter
 
-static const uint8_t POWER_PAYLOAD[] = {0x00};                                   // <<FILL>>
-static const uint8_t UP_PAYLOAD[]    = {0x00};                                   // <<FILL>>
-static const uint8_t DOWN_PAYLOAD[]  = {0x00};                                   // <<FILL>>
+static const uint8_t POWER_PAYLOAD[] = {0x00};                           // <<FILL>>
+static const uint8_t UP_PAYLOAD[]    = {0x00};                           // <<FILL>>
+static const uint8_t DOWN_PAYLOAD[]  = {0x00};                           // <<FILL>>
 // -------------------------------------
 
 enum ThermaSleepButton : uint8_t {
@@ -30,23 +35,16 @@ enum ThermaSleepButton : uint8_t {
   THERMASLEEP_DOWN  = 2,
 };
 
-static RF24 thermasleep_radio(CE_PIN, CSN_PIN);
-
 inline void thermasleep_radio_setup() {
-  if (!thermasleep_radio.begin()) {
-    ESP_LOGE("thermasleep", "nRF24L01+ not responding — check wiring/power.");
-    return;
-  }
-  thermasleep_radio.setChannel(RF_CHANNEL);
-  thermasleep_radio.setDataRate(RF_RATE);
-  thermasleep_radio.setAddressWidth(RF_ADDRESS_WIDTH);
-  thermasleep_radio.setAutoAck(false);
-  thermasleep_radio.setRetries(0, 0);
-  thermasleep_radio.setPALevel(RF24_PA_HIGH);
-  thermasleep_radio.openWritingPipe(RF_ADDRESS);
-  thermasleep_radio.stopListening();
-  ESP_LOGI("thermasleep", "Radio up: ch=%d rate=%d addr_w=%d",
-           RF_CHANNEL, (int)RF_RATE, RF_ADDRESS_WIDTH);
+  // TODO: initialize LT8910 here once the Arduino library is wired in.
+  // The MINI-Qiang/LT8910 lib's API:
+  //   LT8910 radio(SS_PIN, RESET_PIN, PKT_PIN);
+  //   radio.begin(RF_CHANNEL, RF_DATARATE);
+  //   radio.setSyncWord(RF_SYNCWORD, RF_SYNCWIDTH);
+  //   radio.enableCRC();
+  // Wrap as needed for the ESPHome lambda context.
+  ESP_LOGI("thermasleep", "TODO: initialize LT8910 (ch=%d rate=%d)",
+           (int)RF_CHANNEL, (int)RF_DATARATE);
 }
 
 inline void thermasleep_send(ThermaSleepButton btn, uint8_t ctr) {
@@ -59,16 +57,16 @@ inline void thermasleep_send(ThermaSleepButton btn, uint8_t ctr) {
     default: return;
   }
 
-  uint8_t buf[32];
+  uint8_t buf[64];
   memcpy(buf, src, len);
   if (COUNTER_BYTE_INDEX < len) buf[COUNTER_BYTE_INDEX] = ctr;
 
-  // Transmit 3x back-to-back to match the real remote's typical burst pattern and
-  // improve chances of being heard through WiFi interference.
-  for (int i = 0; i < 3; i++) {
-    thermasleep_radio.write(buf, len);
-    delayMicroseconds(500);
-  }
+  // TODO: actually transmit via LT8910:
+  //   for (int i = 0; i < 3; i++) {  // burst 3x like the real remote
+  //     radio.sendPacket(buf, len);
+  //     delayMicroseconds(500);
+  //   }
 
-  ESP_LOGI("thermasleep", "TX btn=%d ctr=0x%02X len=%u", (int)btn, ctr, (unsigned)len);
+  ESP_LOGI("thermasleep", "TX btn=%d ctr=0x%02X len=%u (LT8910 not yet wired)",
+           (int)btn, ctr, (unsigned)len);
 }

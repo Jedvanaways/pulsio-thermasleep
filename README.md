@@ -4,28 +4,37 @@ Bring the Pulsio ThermaSleep water pod under Home Assistant control by reverse-e
 
 The physical remote is **never modified** — it stays fully functional alongside the HA bridge.
 
+> ## ⚠ Plan revision 2026-04-23 — read [CHIP_IDENTIFICATION.md](CHIP_IDENTIFICATION.md)
+> High-resolution photos revealed the RF chip is a **Linktekco LT8910**, NOT an nRF24L01+ family chip as originally assumed. This invalidates the Crazyradio / nRF24L01+ sniffing path. The replacement plan uses an LT8910 module. The original NRF24-based file content below has been updated, but read CHIP_IDENTIFICATION.md first for the full pivot.
+
 ## What this is
 
-- The ThermaSleep remote (board `FX-CD-Z4B-Y11`) transmits 3 commands (Power / Up / Down) over a proprietary 2.4GHz RF link — most likely Nordic nRF24L01+ or a clone (Beken BK24xx / SI24R1 / XN297).
-- Paired remote IDs are stored in the remote's FT24C02A I²C EEPROM — so each remote has a unique address.
-- The plan: sniff the remote's packets over the air, decode the address + channel + payload, then transmit the same packets from an ESP32 + nRF24L01+ module connected to Home Assistant.
+- The ThermaSleep remote (board `FX-CD-Z4B-Y11`) transmits 3 commands (Power / Up / Down) over a proprietary 2.4GHz RF link using a **Linktekco LT8910** transceiver (chip marked `NST LT8910SSC`).
+- The MCU is an unidentified Chinese 8-bit chip (`RD8F12AQ2205A`).
+- Paired remote IDs are stored in the remote's FT24C02A I²C EEPROM.
+- The plan: discover the LT8910 sync word + channel + payload format (via SPI bus tap, EEPROM dump, or sync-word brute force), then transmit the same packets from an ESP32 + LT8910 module connected to Home Assistant.
 
 Four phases, each with a go/no-go gate.
 
-## Hardware you'll need
+## Hardware you'll need (revised for LT8910)
 
-**Sniffer** (pick one):
-- [Crazyradio PA](https://www.bitcraze.io/products/crazyradio-pa/) — ~£30. The path of least resistance.
-- ESP32 + nRF24L01+ PA+LNA + socket adapter — ~£13 total. Cheaper, but sniffing is slower and noisier.
+**Sniffer / discovery** (pick one or more):
+- **Logic analyzer** (Saleae clone, ~£10) — for SPI bus tap on U4. The most reliable way to discover sync word + channel + payload format. Requires soldering thin wires to U4's SPI pins.
+- **LT8910 module** (~£3-5 from AliExpress, 2-3 week ship) — for RSSI scanning to find the channel, and brute-force sync word search.
+- **LT8920 module** (sister chip) — has a RAW RX mode that allows actual packet sniffing. Better than LT8910 if available.
+- **HackRF / SDR** (~£200+) — universal solution if you want to capture & decode in software (gqrx + GNU Radio + custom GFSK decoder). Heavyweight.
 
 **HA gateway (always required)**:
-- ESP32 dev kit with pre-soldered headers (e.g. ESP32-DevKitC-V4)
-- nRF24L01+ PA+LNA module **plus** a "socket adapter" / "SMD adapter" board (adds regulator + decoupling caps — stock modules brown out the ESP32's 3.3V rail)
-- Half-size breadboard
-- Female-to-female Dupont jumper wires
-- USB cable + 5V phone charger
+- ESP32 dev kit with pre-soldered headers (e.g. Binghe ESP-WROOM-32D)
+- LT8910 module on SPI
+- Half-size breadboard + Dupont jumpers
+- USB-C cable
 
-Total: **~£50** with Crazyradio, **~£18** ESP32-only.
+**No longer useful for this project**:
+- The nRF24L01+ modules — wrong RF protocol. Save them for unrelated projects.
+- The Crazyradio PA — don't buy. Wrong chip family.
+
+Total revised: **~£15** for the gateway hardware (already mostly ordered). LT8910 module + logic analyzer add ~£15 more.
 
 ## Work order
 
@@ -36,34 +45,32 @@ Total: **~£50** with Crazyradio, **~£18** ESP32-only.
 5. **Phase 3 — Build HA gateway (2–4 hours)** — finalize [`esphome/thermasleep.yaml`](esphome/thermasleep.yaml) + [`esphome/thermasleep_radio.h`](esphome/thermasleep_radio.h), flash it, plug it in near the pod.
 6. **Phase 4 — HA (30 min)** — accept the auto-discovered ESPHome device, build a Lovelace card, add automations.
 
-## Phase 1 — Sniff
+## Phase 1 — Discover the LT8910 parameters
 
-With Crazyradio PA:
+The LT8910 has no promiscuous mode — it only receives packets matching a known sync word. So Phase 1 is split into two halves:
 
-```sh
-# Flash firmware (one-time)
-./tools/install-bastille-macos.sh
+### 1a. Find the channel (cheap, no soldering)
 
-# Scan all 2.4GHz channels for any nRF24 activity
-cd nrf-research-firmware/tools
-./nrf24-scanner.py -c 2-83
-```
+With an ESP32 + LT8910 module wired up, run `tools/replay-test.ino` and use the `s` (scan) command. It loops through all 84 channels reading RSSI; press buttons on the remote during the scan and look for a channel that lights up (RSSI ≥ ~30/31). That's the pod's channel.
 
-Put fresh batteries in the remote. Hold it within 30cm of the Crazyradio. Press **Power** 10 times — the scanner should print hex lines like:
+### 1b. Find the sync word + payload (hard part)
 
-```
-[2025-04-22 20:34:12]  CH:  47   A:FA:14:7B:22:33   CRC:OK   P:aa 55 01 00 1c
-```
+Three options, in order of reliability:
 
-- `CH` = channel — write it down, should be the same for all 3 buttons
-- `A:` = on-air address — write it down
-- `P:` = payload hex — copy each line into `captures/power.txt`
+**Option A — SPI bus tap on U4 (most reliable):**
+1. Solder 4 thin (30 AWG) wires to U4's SPI pins: SCK, MOSI, MISO, SS. Refer to the LT8910 datasheet for SSOP-16 pinout.
+2. Hook each to a logic analyzer (Saleae Logic 8 clone, £10).
+3. Power the remote up — the MCU will configure the LT8910 in the first ~10ms after boot, writing the sync word into LT8910 register 27 (and friends).
+4. Decode the SPI capture in PulseView or Saleae Logic software. Look for `wr_reg(27, ...)` writes — that's the sync word.
+5. Press a button — capture the `wr_reg(50, ...)` calls (TX FIFO) to see the actual payload bytes.
 
-Repeat for **Up** → `captures/up.txt`, **Down** → `captures/down.txt`.
+**Option B — EEPROM dump (no soldering, may not contain sync word):**
+Run `./tools/dump-eeprom.sh`. The 256-byte EEPROM dump might contain the sync word in plaintext if Pulsio stored it there for runtime config. Look for stable 4-byte values surrounded by `0xFF` regions.
 
-**If the scanner catches nothing in 5 minutes**, try narrower ranges (`-c 2-20`, `-c 70-83`), or switch to `./nrf24-sniffer.py -a FA:14:7B:22:33 -c <n>` once you've seen one packet.
+**Option C — Brute force the sync word:**
+Try LT8910 default sync word `0x7654` first. If that doesn't work, write a sketch that loops through all 65,536 possible 16-bit sync words at the discovered channel, attempting RX for ~100ms each. Total time: ~2 hours. Tedious but solder-free.
 
-**If still nothing after 30 minutes**, see the [Troubleshooting](#troubleshooting) section.
+Once you have a channel + sync word that produces packets, save raw hex captures to `captures/power.txt` etc.
 
 ## Phase 2 — Decode
 
@@ -147,37 +154,43 @@ script:
             - delay: "00:00:00.5"
 ```
 
-## Wiring
+## Wiring (LT8910 module to ESP32)
 
-| nRF24L01+ pin | ESP32 pin |
+| LT8910 module pin | ESP32 pin |
 |---|---|
-| VCC | 3V3 (via PA+LNA socket adapter's own regulator) |
-| GND | GND |
-| CE  | GPIO 4 |
-| CSN | GPIO 5 |
-| SCK | GPIO 18 |
-| MOSI | GPIO 23 |
+| VCC  | 3V3 |
+| GND  | GND |
+| PKT (IRQ) | GPIO 2 (optional) |
 | MISO | GPIO 19 |
-| IRQ | GPIO 2 (optional) |
+| MOSI | GPIO 23 |
+| SCK  | GPIO 18 |
+| RESET | GPIO 4 |
+| SS (CSN) | GPIO 5 |
 
-**Important**: Do not feed 3.3V directly to a bare nRF24L01+ module. ESP32's 3.3V LDO cannot supply the ~100mA peaks the module draws in TX. Use a PA+LNA module on its socket adapter (has its own AMS1117 regulator + 10µF cap), fed from 5V. Without this you'll get mysterious resets and failed transmissions.
+**Important**: LT8910 module pinout is NOT the same as nRF24L01+ — RESET and SS swap places. Check your module's silkscreen carefully. The LT8910 draws much less peak current than an nRF24 PA+LNA, so the ESP32's 3V3 rail can supply it directly without an external regulator/adapter board.
 
 ## Troubleshooting
 
-### Scanner sees nothing
+### LT8910 module doesn't respond at boot
 
-- Confirm the remote is actually transmitting: fresh batteries, LED blinks on button press (if LED5 on the back lights up, RF is powered).
-- Try a borrowed RTL-SDR with a 2.4GHz up/downconverter or a HackRF in survey mode — should see visible bursts on button press.
-- Beken BK24xx chips use 2-byte preamble (not nRF's 1-byte). Bastille scanner handles both, but the ESP32-based sniffer alternative may not — see the Crazyradio path instead.
-- Check data rate — Chinese remotes often use 250 kbps, not 1 Mbps or 2 Mbps. Re-run scanner at each rate.
+- Wiring: confirm SS and RESET are NOT swapped (common mistake — LT8910 differs from nRF24 here).
+- Verify 3.3V power and GND. The module is 3.3V max; do NOT feed it 5V.
+- Check the chip marking on your module is actually LT8910 (or LT8920) — eBay/AliExpress sellers occasionally swap chips.
 
-### Replay doesn't trigger the pod, real remote does
+### RSSI scan shows no peaks when remote is pressed
 
-See [Fallback](#fallback) — protocol has anti-replay (rolling code or encrypted counter).
+- Fresh batteries in the remote (3V coin cells).
+- LED5 on the back of the remote should blink on each press — confirms RF is powered.
+- Move the LT8910 module within 30 cm of the remote during scan.
+- Re-run scan at different data rates (1 Mbps default, but try 250 kbps).
 
-### ESP32 resets mid-transmit
+### Pod ignores replays from ESP32 but obeys real remote
 
-Power issue with the nRF24. Get the PA+LNA socket adapter; do not run a bare nRF24L01+ off the ESP32's 3V3 rail.
+Sync word is wrong, OR payload counter / CRC handling is wrong. Re-check the SPI bus tap capture for register writes you missed.
+
+### ESP32 brownouts during TX
+
+LT8910 draws ~30 mA peak in TX, well within the ESP32's 3V3 budget. If you're seeing brownouts it's something else — check USB cable and supply.
 
 ## Fallback
 
@@ -195,17 +208,21 @@ This sacrifices the "no mod to the remote" goal but works for any remote protoco
 ```
 .
 ├── README.md                       # this file
-├── decode.md                       # Phase 2 protocol writeup
+├── CHIP_IDENTIFICATION.md          # 2026-04-23 plan revision — read first
+├── decode.md                       # Phase 2 protocol writeup (LT8910)
 ├── captures/                       # Phase 1 raw captures
 │   ├── README.md
 │   ├── power.txt
 │   ├── up.txt
 │   └── down.txt
 ├── tools/
-│   ├── install-bastille-macos.sh   # one-shot Crazyradio PA setup
-│   └── replay-test.ino             # Phase 2.5 ESP32 sanity-check sketch
+│   ├── replay-test.ino             # ESP32 + LT8910 sanity-check + RSSI scanner
+│   ├── dump-firmware.sh            # ST-Link MCU dump (probably won't work — MCU is unidentified Chinese)
+│   ├── dump-eeprom.sh              # CH341A FT24C02A EEPROM dump
+│   ├── check-logitech-receiver.ps1 # Windows: detect flashable Logitech dongles (legacy from NRF24 plan)
+│   └── install-bastille-macos.sh   # legacy from NRF24 plan — kept for reference
 └── esphome/
     ├── thermasleep.yaml            # Phase 3 HA gateway config
-    ├── thermasleep_radio.h         # Phase 3 radio + payload constants
+    ├── thermasleep_radio.h         # Phase 3 LT8910 helper
     └── secrets.yaml.example        # WiFi + API secrets template
 ```
